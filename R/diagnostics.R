@@ -1,3 +1,82 @@
+# ============================================================================
+# Internal PSIS-LOO helpers
+#
+# The previous implementation passed a 3-D array [draws, time, sector] to
+# loo::loo(), which interprets a 3-D array as [iterations, chains, observations]
+# -> it silently treated the time axis as "chains" and only the S sectors as
+# observations. These helpers reshape the per-(t,s) log-likelihood into a proper
+# [draws x observations] matrix over the fitted window 2:T_lik, with a chain_id
+# so relative_eff() can estimate the relative effective sample size correctly.
+# ============================================================================
+
+#' Extract a log-likelihood draws matrix with chain ids (column-named log_lik[t,s])
+#' @keywords internal
+#' @noRd
+.extract_loglik_mat <- function(fit) {
+  if (inherits(fit, "CmdStanMCMC")) {
+    mat <- fit$draws("log_lik", format = "matrix")
+    n_chains <- tryCatch(fit$num_chains(), error = function(e) 1L)
+  } else {
+    a <- rstan::extract(fit, pars = "log_lik", permuted = FALSE) # [iter, chain, var]
+    n_chains <- dim(a)[2]
+    vnames <- dimnames(a)[[3]]
+    mat <- do.call(rbind, lapply(seq_len(n_chains), function(ci) {
+      m <- a[, ci, , drop = FALSE]
+      dim(m) <- dim(a)[c(1, 3)]
+      colnames(m) <- vnames
+      m
+    }))
+  }
+  total <- nrow(mat)
+  if (n_chains < 1L || total %% n_chains != 0) n_chains <- 1L
+  list(mat = mat, chain_id = rep(seq_len(n_chains), each = total / n_chains))
+}
+
+#' Build a PSIS-LOO object from a log-lik matrix over the window 2:T_lik
+#' @keywords internal
+#' @noRd
+.loo_from_loglik <- function(ll_mat, chain_id, T_lik, S) {
+  t_idx <- 2:T_lik
+  want <- as.vector(vapply(
+    seq_len(S),
+    function(s) sprintf("log_lik[%d,%d]", t_idx, s),
+    character(length(t_idx))
+  ))
+  miss <- setdiff(want, colnames(ll_mat))
+  if (length(miss) > 0L) {
+    stop(sprintf("Missing %d expected log_lik columns (e.g. '%s').",
+                 length(miss), miss[1]), call. = FALSE)
+  }
+  ll_used <- ll_mat[, want, drop = FALSE]
+  r_eff <- tryCatch(
+    loo::relative_eff(exp(ll_used), chain_id = chain_id),
+    error = function(e) NULL
+  )
+  loo::loo(ll_used, r_eff = r_eff)
+}
+
+#' @keywords internal
+#' @noRd
+.compute_loo <- function(fit, T_lik, S) {
+  ex <- .extract_loglik_mat(fit)
+  .loo_from_loglik(ex$mat, ex$chain_id, T_lik, S)
+}
+
+#' Summarize Pareto-k diagnostics from a loo object
+#' @keywords internal
+#' @noRd
+.summarize_pareto_k <- function(loo_res) {
+  k <- tryCatch(loo_res$diagnostics$pareto_k, error = function(e) NULL)
+  if (is.null(k)) return(NULL)
+  list(
+    n = length(k),
+    max = max(k, na.rm = TRUE),
+    prop_gt_0.7 = mean(k > 0.7, na.rm = TRUE),
+    prop_gt_1   = mean(k > 1,   na.rm = TRUE)
+  )
+}
+
+
 #' Count HMC divergences
 #'
 #' Extracts the number of divergent transitions from a fitted Stan model.
@@ -71,7 +150,25 @@ count_divergences <- function(fit) {
 #' @param com_in_mean Logical. Whether COM is included in mean equation
 #' @param horizons Integer vector. Forecast horizons to evaluate
 #'
-#' @return Named list with one element per horizon...
+#' @return Named list with one element per horizon, each a list with
+#'   \code{h}, \code{RMSE}, \code{MAE} and \code{n_obs} (number of pooled
+#'   sector-by-origin errors; \code{0} / \code{NA} when the horizon exceeds the
+#'   test window).
+#'
+#' @details
+#' Two caveats matter for interpretation:
+#' \enumerate{
+#'   \item \strong{Conditional forecast.} The recursion uses the \emph{realized}
+#'     future covariates \eqn{X_{t-1}} and \eqn{zTMG_t} at each step. It is
+#'     therefore a forecast of \eqn{Y} \emph{conditional on} the future paths of
+#'     \eqn{X} and TMG, not an unconditional forecast. If those covariates are
+#'     not known ex ante, treat these numbers as conditional/nowcasting metrics.
+#'   \item \strong{Plug-in medians.} The path is propagated with posterior
+#'     medians of the parameters and ignores parameter uncertainty, the
+#'     stochastic volatility and the Student-t innovations. It is a point
+#'     (mean-equation) forecast, not the full posterior predictive distribution.
+#'     For genuinely out-of-sample numbers, fit with \code{fit_window = "train"}.
+#' }
 #'
 #' @examples
 #' # 1. Generate dummy data for testing
@@ -119,9 +216,16 @@ evaluate_oos <- function(summ, Yz, Xz, zTMG, T_train,
   }
   
   res <- lapply(horizons, function(hh) {
+    last_origin <- Tn - hh + 1
+    if (last_origin < (T_train + 1)) {
+      # Horizon longer than the available test window: nothing to evaluate.
+      # (Previously this produced a descending ':' sequence and out-of-range
+      # indexing.)
+      return(list(h = hh, RMSE = NA_real_, MAE = NA_real_, n_obs = 0L))
+    }
     errs <- c()
-    
-    for (t in (T_train + 1):(Tn - hh + 1)) {
+
+    for (t in seq.int(T_train + 1, last_origin)) {
       if (t - 1 < 1) next
       
       y_pred <- Yz[t - 1, ]
@@ -153,8 +257,9 @@ evaluate_oos <- function(summ, Yz, Xz, zTMG, T_train,
     
     list(
       h = hh,
-      RMSE = sqrt(mean(errs^2, na.rm = TRUE)),
-      MAE = mean(abs(errs), na.rm = TRUE)
+      RMSE = if (length(errs)) sqrt(mean(errs^2, na.rm = TRUE)) else NA_real_,
+      MAE  = if (length(errs)) mean(abs(errs), na.rm = TRUE) else NA_real_,
+      n_obs = length(errs)
     )
   })
   
@@ -194,27 +299,59 @@ evaluate_oos <- function(summ, Yz, Xz, zTMG, T_train,
 #'
 #' @export
 validate_ou_fit <- function(fit_res, verbose = TRUE) {
+  # ---- Hard structural checks (this is a real validator, not just a report) ----
+  if (!is.list(fit_res)) {
+    stop("`fit_res` must be a list returned by fit_ou_nonlinear_tmg().",
+         call. = FALSE)
+  }
+  required <- c("factor_ou", "diagnostics")
+  missing_top <- setdiff(required, names(fit_res))
+  if (length(missing_top) > 0) {
+    stop("`fit_res` is missing required components: ",
+         paste(missing_top, collapse = ", "), call. = FALSE)
+  }
   dg <- fit_res$diagnostics
-  
+  if (is.null(dg$rhat)) {
+    warning("No R-hat found in diagnostics; the fit may be incomplete.",
+            call. = FALSE)
+  }
+
   if (verbose) {
     message("\n==== NONLINEAR OU MODEL VALIDATION ====")
-    message("R-hat (summary):")
-    print(utils::head(dg$rhat))
-    message("\nESS (summary):")
-    print(utils::head(dg$ess))
-    
-    if (!is.null(dg$loo)) {
-      message("\nPSIS-LOO:")
-      print(dg$loo)
+
+    message("\n-- MCMC convergence --")
+    message(sprintf("Max R-hat: %.4f   share(R-hat > 1.01): %.3f",
+                    dg$rhat_max %||% NA_real_, dg$rhat_share %||% NA_real_))
+    if (!is.null(dg$rhat_max) && is.finite(dg$rhat_max) && dg$rhat_max > 1.01) {
+      message("  WARNING: R-hat > 1.01 -> chains may not have converged.")
     }
-    
-    message("\nOOS metrics:")
+    message(sprintf("Divergences: %s", dg$divergences %||% NA))
+    message("R-hat (head):"); print(utils::head(dg$rhat))
+    message("ESS (head):");   print(utils::head(dg$ess))
+
+    if (!is.null(dg$loo)) {
+      message("\n-- PSIS-LOO --")
+      print(dg$loo)
+      pk <- dg$loo_pareto_k
+      if (!is.null(pk)) {
+        message(sprintf(
+          "Pareto-k: max = %.2f | share > 0.7 = %.3f | share > 1 = %.3f",
+          pk$max, pk$prop_gt_0.7, pk$prop_gt_1))
+        if (pk$prop_gt_0.7 > 0.05) {
+          message("  WARNING: many Pareto-k > 0.7 -> PSIS-LOO unreliable ",
+                  "(expected with one latent SV state per observation; ",
+                  "consider LFO-CV).")
+        }
+      }
+    }
+
+    message("\n-- OOS metrics --")
     print(dg$oos)
-    
+
     beta1 <- fit_res$factor_ou$beta1
     message(sprintf(
-      "\nH1: beta1 sign - median point estimate: %s",
-      if (beta1 > 0) ">0" else "<=0"
+      "\nH1: beta1 (TMG effect) median point estimate: %.4f (%s)",
+      beta1, if (beta1 > 0) ">0" else "<=0"
     ))
     
     a3_med <- fit_res$nonlinear$a3
@@ -281,13 +418,34 @@ compare_models_loo <- function(results_new, results_base) {
     stop("Package 'loo' is required for model comparison.")
   }
   
-  loo_new <- results_new$diagnostics$loo
+  loo_new <- results_new$diagnostics$loo %||% results_new$loo
   loo_base <- results_base$diagnostics$loo %||% results_base$loo
-  
+
+  if (is.null(loo_new) || is.null(loo_base)) {
+    stop("Both results must contain a 'loo' object (diagnostics$loo).",
+         call. = FALSE)
+  }
+  if (!inherits(loo_new, "loo") || !inherits(loo_base, "loo")) {
+    stop("The 'loo' components must be objects of class 'loo'.", call. = FALSE)
+  }
+  n_new <- nrow(loo_new$pointwise)
+  n_base <- nrow(loo_base$pointwise)
+  if (!is.null(n_new) && !is.null(n_base) && n_new != n_base) {
+    stop(sprintf(paste0("LOO objects have different numbers of observations ",
+                        "(%d vs %d); they are not comparable. Ensure both models ",
+                        "use the same data and fit_window."), n_new, n_base),
+         call. = FALSE)
+  }
+
   cmp <- loo::loo_compare(loo_new, loo_base)
-  
+
+  # Unambiguous new-minus-base difference (positive => new model preferred),
+  # computed from the estimates rather than relying on loo_compare row order.
+  elpd_new <- loo_new$estimates["elpd_loo", "Estimate"]
+  elpd_base <- loo_base$estimates["elpd_loo", "Estimate"]
+
   list(
     loo_table = cmp,
-    deltaELPD = as.numeric(loo::loo_compare(loo_new, loo_base)[1, "elpd_diff"])
+    deltaELPD = as.numeric(elpd_new - elpd_base)
   )
 }

@@ -11,7 +11,7 @@ drift_decomposition_grid(fit, summ, z_grid = seq(-2.5, 2.5, length.out = 101))
 
 \item{summ}{List. Output from \code{\link{extract_posterior_summary}}}
 
-\item{z_grid}{Numeric vector. Grid of z values to evaluate drift.}
+\item{z_grid}{Numeric vector. Grid of centered deviation values (Y - theta).}
 }
 \value{
 List with components:
@@ -21,5 +21,9 @@ List with components:
   }
 }
 \description{
-Computes the cubic OU drift function over a grid of z values.
+Computes the cubic OU drift function over a grid of \emph{centered} deviations
+\eqn{z = Y - \theta_s}. The evaluated function is
+\eqn{\kappa_s(-z + a_{3,s} z^3)}, i.e. the drift expressed in the deviation
+coordinate, not in the original \eqn{Y} coordinate. To plot against \eqn{Y},
+shift the grid by the corresponding \code{theta_s}.
 }

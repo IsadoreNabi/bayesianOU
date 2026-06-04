@@ -2,7 +2,7 @@
 % Please edit documentation in R/extractors.R
 \name{extract_convergence_evidence}
 \alias{extract_convergence_evidence}
-\title{Extract convergence evidence for kappa parameters}
+\title{Mean-reversion (dynamic stability) evidence for kappa parameters}
 \usage{
 extract_convergence_evidence(fit_res, verbose = TRUE)
 }
@@ -15,14 +15,28 @@ extract_convergence_evidence(fit_res, verbose = TRUE)
 List with components:
   \describe{
     \item{kappa_ic95}{Matrix (S x 3) with columns q2.5, median, q97.5}
-    \item{convergence}{Logical indicating if all kappa in (0,1)}
-    \item{prob_convergence}{Posterior probability of joint convergence}
+    \item{stable}{Logical indicating if all kappa CIs fall in (0,1)}
+    \item{convergence}{Deprecated alias of \code{stable} (kept for back-compat)}
+    \item{prob_stable}{Posterior probability of joint mean reversion}
+    \item{prob_convergence}{Deprecated alias of \code{prob_stable}}
   }
 }
 \description{
-Computes 95 percent credible intervals for each kappa_s (mean reversion speed)
-and verifies formal convergence conditions.
+Computes 95 percent credible intervals for each \code{kappa_s} (mean
+reversion speed) and the posterior probability that every sector reverts.
 }
+\section{Important - this is NOT MCMC convergence}{
+
+Despite the historical name, this function does NOT assess sampler
+convergence. It evaluates a \emph{dynamic} property of the estimated process:
+whether the mean-reversion speed lies in a range consistent with a stable,
+reverting (gravitating) system. For sampler convergence use R-hat, ESS and
+divergences (see \code{\link{validate_ou_fit}}). The threshold
+\code{kappa < 1} is a (conservative) monotone-reversion criterion; under the
+Euler discretization the linear map is stable for \code{0 < kappa < 2}.
+The alias \code{\link{kappa_stability_evidence}} is preferred.
+}
+
 \examples{
 \donttest{
 # 1. Create a mock fit object with kappa draws

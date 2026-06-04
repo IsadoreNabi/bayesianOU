@@ -2,31 +2,41 @@
 % Please edit documentation in R/stan_code.R
 \name{ou_nonlinear_tmg_stan_code}
 \alias{ou_nonlinear_tmg_stan_code}
-\title{Stan code for nonlinear OU model with SV and Student-t}
+\title{Stan code for the nonlinear OU model with SV and Student-t}
 \usage{
 ou_nonlinear_tmg_stan_code()
 }
 \value{
-Character string containing Stan model code
+Character string containing the Stan model code.
 }
 \description{
 Returns the complete Stan code for the nonlinear Ornstein-Uhlenbeck model
-with cubic drift, stochastic volatility, and Student-t innovations.
-Includes numerical guardrails and parallel computation support.
+with cubic drift, stochastic volatility, Student-t innovations, and a
+non-centered hierarchical (partial-pooling) parameterization for the
+sector-specific parameters.
 }
 \details{
+The code is read from the canonical file \code{inst/stan/ou_nonlinear_tmg.stan}
+(single source of truth); this function does not embed a duplicate copy.
+
+
 The model implements:
 \itemize{
-  \item Cubic drift: \eqn{\kappa(\theta - Y + a_3(Y-\theta)^3)}
-  \item Stochastic volatility with AR(1) log-variance
-  \item Student-t innovations with estimated degrees of freedom
-  \item Hierarchical priors for sector-specific parameters
-  \item Optional soft constraint on TMG variable
-  \item Parallel likelihood computation via reduce_sum
+  \item Cubic drift: \eqn{\kappa(\theta - Y + a_3(Y-\theta)^3)} with the
+    restoring-force assumption \eqn{a_3 < 0} (enforced via \code{-exp()}).
+  \item Stochastic volatility with a stationary AR(1) log-variance.
+  \item Student-t innovations with estimated degrees of freedom (\eqn{\nu>2}).
+  \item Real non-centered hierarchical priors for \code{theta_s},
+    \code{kappa_s}, \code{a3_s} and \code{beta0_s} (the hyperparameters are
+    actually used to build the sector parameters).
+  \item Configurable priors for \code{beta1}, \code{nu} and \code{rho_s}.
+  \item A likelihood/log-lik window controlled by \code{T_lik} to keep the
+    training/test split coherent (no leakage).
+  \item Parallel likelihood computation via \code{reduce_sum}.
 }
 }
 \examples{
 code <- ou_nonlinear_tmg_stan_code()
-cat(substr(code, 1, 500))
+cat(substr(code, 1, 300))
 
 }

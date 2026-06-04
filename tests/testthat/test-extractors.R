@@ -13,10 +13,12 @@ test_that("build_accounting_block returns correct structure", {
   )
   
   expect_type(result, "list")
-  expect_named(result, c("tmg_byK", "tmg_exo", "wedge_delta", 
-                         "sigma_delta_prior", "note"))
+  expect_named(result, c("tmg_byK", "tmg_exo", "wedge_delta",
+                         "sigma_delta_prior", "backtransform_max_err", "note"))
   expect_length(result$tmg_byK, 100)
   expect_true(all(result$wedge_delta == 0))
+  # Back-transform of the exogenous TMG must reproduce the raw series.
+  expect_lt(result$backtransform_max_err, 1e-8)
 })
 
 test_that("build_accounting_block soft constraint has non-zero wedge", {

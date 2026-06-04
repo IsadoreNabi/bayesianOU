@@ -12,18 +12,20 @@ fit_ou_nonlinear_tmg(
   COM,
   CAPITAL_TOTAL,
   model = c("base"),
-  priors = list(sigma_delta = 0.002),
+  priors = list(),
   com_in_mean = TRUE,
+  train_frac = 0.7,
+  fit_window = c("train", "full"),
   chains = 6,
   iter = 12000,
   warmup = 6000,
-  thin = 2,
+  thin = 1,
   cores = max(1, parallel::detectCores() - 1),
   threads_per_chain = 2,
   hard_sum_zero = TRUE,
   orthogonalize_tmg = TRUE,
   factor_from = c("X", "Y"),
-  use_train_loadings = FALSE,
+  use_train_loadings = TRUE,
   adapt_delta = 0.97,
   max_treedepth = 12,
   seed = 1234,
@@ -47,21 +49,39 @@ fit_ou_nonlinear_tmg(
 
 \item{model}{Character. Model type. Currently only "base" supported.}
 
-\item{priors}{List. Prior specifications. Currently supports sigma_delta.}
+\item{priors}{List. Prior specifications (partial override allowed; missing
+entries fall back to robust defaults). Supported names: \code{sigma_delta}
+(wedge SD, original units, default 0.002); \code{beta1_mean}/\code{beta1_sd}
+(prior for the global TMG effect, default 0 / 0.5 -- neutral, no sign baked
+in); \code{nu_shape}/\code{nu_rate} (gamma prior for the Student-t degrees of
+freedom shift, default 2 / 0.1 -> weakly informative, prior mean nu ~ 22);
+\code{rho_mean}/\code{rho_sd} (SV persistence prior, default 0.7 / 0.2).}
 
 \item{com_in_mean}{Logical. Include COM effect in mean equation. Default TRUE.}
 
+\item{train_frac}{Numeric in (0,1). Fraction of observations used for the
+training window. Default 0.70.}
+
+\item{fit_window}{Character. \code{"train"} (default) fits the likelihood and
+computes \code{log_lik} ONLY on the training window (2:T_train), so the
+test window is genuinely held out and \code{evaluate_oos} is a real
+out-of-sample evaluation. \code{"full"} fits on all observations
+(full-information / rstanarm-style); then PSIS-LOO is valid over all points
+but \code{evaluate_oos} becomes in-sample. See the README methodology note.}
+
 \item{chains}{Integer. Number of MCMC chains. Default 6.}
 
-\item{iter}{Integer. Total iterations per chain. Default 12000.}
+\item{iter}{Integer. Total iterations per chain (must exceed warmup). Default 12000.}
 
 \item{warmup}{Integer. Warmup iterations. Default 6000.}
 
-\item{thin}{Integer. Thinning interval. Default 2.}
+\item{thin}{Integer. Thinning interval. Default 1 (thinning is statistically
+wasteful in HMC; increase only to save memory).}
 
 \item{cores}{Integer. Number of cores for parallel chains.}
 
-\item{threads_per_chain}{Integer. Threads per chain for within-chain parallelism.}
+\item{threads_per_chain}{Integer. Threads per chain for within-chain
+parallelism. Capped internally so parallel_chains * threads <= cores.}
 
 \item{hard_sum_zero}{Logical. If TRUE, TMG wedge is fixed at zero. Default TRUE.}
 
@@ -69,7 +89,8 @@ fit_ou_nonlinear_tmg(
 
 \item{factor_from}{Character. Source for common factor: "X" or "Y". Default "X".}
 
-\item{use_train_loadings}{Logical. Compute factor loadings from training only. Default FALSE.}
+\item{use_train_loadings}{Logical. Compute factor loadings from training only
+(avoids look-ahead leakage). Default TRUE.}
 
 \item{adapt_delta}{Numeric. Target acceptance rate (0-1). Default 0.97.}
 
@@ -99,9 +120,20 @@ Fits a Bayesian nonlinear Ornstein-Uhlenbeck model with cubic drift,
 stochastic volatility, and Student-t innovations using Stan.
 }
 \details{
-The model uses hierarchical priors for sector-specific parameters.
-Training period is set to 70 percent of observations by default.
-All data standardization uses training period statistics only.
+The model uses a non-centered hierarchical (partial-pooling) parameterization
+for the sector-specific parameters \code{theta_s}, \code{kappa_s},
+\code{a3_s} and \code{beta0_s}: each is built as
+\code{hyper_intercept + hyper_slope * COM_s + hyper_sd * z}, with
+\code{z ~ N(0,1)}. The training window is \code{floor(T * train_frac)}.
+All data standardization, the COM weighting, and (by default) the common
+factor loadings are computed from the training window only. The likelihood
+window is controlled by \code{fit_window} to keep train/test coherent.
+
+The cubic drift enforces \code{a3 < 0} (a restoring force that strengthens
+with the deviation); this is a stability \emph{assumption}, not an estimated
+result, and it precludes detecting locally expansive (self-amplifying)
+regimes. The Euler discretization uses dt = 1, so the discrete persistence of
+the linear part is \code{1 - kappa}; interpret half-lives accordingly.
 }
 \examples{
 \donttest{

@@ -4,12 +4,15 @@
 \alias{build_beta_tmg_table}
 \title{Build beta(TMG_t) table by sector and time}
 \usage{
-build_beta_tmg_table(fit, zTMG_use)
+build_beta_tmg_table(fit, zTMG_use, summ = NULL)
 }
 \arguments{
 \item{fit}{Fitted Stan model object}
 
 \item{zTMG_use}{Numeric vector. Standardized TMG series used in fitting.}
+
+\item{summ}{Optional list from \code{\link{extract_posterior_summary}}. If
+supplied, it is reused instead of recomputing the (expensive) summary.}
 }
 \value{
 List with components:
@@ -20,4 +23,10 @@ List with components:
 }
 \description{
 Constructs the time-varying beta matrix using posterior medians.
+}
+\details{
+This is a deterministic point reconstruction
+\eqn{\beta_{s}(t) = \beta_{0,s} + \beta_1 \cdot zTMG_t} evaluated at the
+posterior medians of \code{beta0_s} and \code{beta1}. It is NOT a sampled
+time-varying coefficient: the time variation comes only from \code{zTMG_t}.
 }

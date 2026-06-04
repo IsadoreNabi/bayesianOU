@@ -143,10 +143,20 @@ extract_posterior_summary <- function(fit) {
 }
 
 
-#' Extract convergence evidence for kappa parameters
+#' Mean-reversion (dynamic stability) evidence for kappa parameters
 #'
-#' Computes 95 percent credible intervals for each kappa_s (mean reversion speed)
-#' and verifies formal convergence conditions.
+#' Computes 95 percent credible intervals for each \code{kappa_s} (mean
+#' reversion speed) and the posterior probability that every sector reverts.
+#'
+#' @section Important - this is NOT MCMC convergence:
+#' Despite the historical name, this function does NOT assess sampler
+#' convergence. It evaluates a \emph{dynamic} property of the estimated process:
+#' whether the mean-reversion speed lies in a range consistent with a stable,
+#' reverting (gravitating) system. For sampler convergence use R-hat, ESS and
+#' divergences (see \code{\link{validate_ou_fit}}). The threshold
+#' \code{kappa < 1} is a (conservative) monotone-reversion criterion; under the
+#' Euler discretization the linear map is stable for \code{0 < kappa < 2}.
+#' The alias \code{\link{kappa_stability_evidence}} is preferred.
 #'
 #' @param fit_res List returned by \code{\link{fit_ou_nonlinear_tmg}}
 #' @param verbose Logical. Print summary to console. Default TRUE.
@@ -154,8 +164,10 @@ extract_posterior_summary <- function(fit) {
 #' @return List with components:
 #'   \describe{
 #'     \item{kappa_ic95}{Matrix (S x 3) with columns q2.5, median, q97.5}
-#'     \item{convergence}{Logical indicating if all kappa in (0,1)}
-#'     \item{prob_convergence}{Posterior probability of joint convergence}
+#'     \item{stable}{Logical indicating if all kappa CIs fall in (0,1)}
+#'     \item{convergence}{Deprecated alias of \code{stable} (kept for back-compat)}
+#'     \item{prob_stable}{Posterior probability of joint mean reversion}
+#'     \item{prob_convergence}{Deprecated alias of \code{prob_stable}}
 #'   }
 #'
 #' @examples
@@ -206,27 +218,44 @@ extract_convergence_evidence <- function(fit_res, verbose = TRUE) {
   
   all_positive <- all(kappa_ic95[, "q2.5"] > 0)
   all_less_one <- all(kappa_ic95[, "q97.5"] < 1)
-  convergence <- all_positive && all_less_one
-  
-  prob_conv <- mean(apply(kappa_draws > 0 & kappa_draws < 1, 1, all))
-  
+  stable <- all_positive && all_less_one
+
+  prob_stable <- mean(apply(kappa_draws > 0 & kappa_draws < 1, 1, all))
+
   if (verbose) {
-    message("\n=== FORMAL CONVERGENCE EVIDENCE (NONLINEAR) ===")
+    message("\n=== MEAN-REVERSION (DYNAMIC STABILITY) EVIDENCE ===")
+    message("    (this is NOT MCMC convergence; see ?validate_ou_fit)")
     message(paste(rep("=", 50), collapse = ""))
     message("95% CI for kappa_s (mean reversion speed) by sector:\n")
     print(utils::head(kappa_ic95, 10))
-    message("\nConvergence verification:")
-    message(sprintf("- All kappa > 0: %s", all_positive))
-    message(sprintf("- All kappa < 1: %s", all_less_one))
-    message(sprintf("- CONVERGENCE GUARANTEED: %s", convergence))
-    message(sprintf("\nP(convergence | data) = %.3f", prob_conv))
+    message("\nMean-reversion verification:")
+    message(sprintf("- All kappa CIs > 0 (revert): %s", all_positive))
+    message(sprintf("- All kappa CIs < 1 (monotone): %s", all_less_one))
+    message(sprintf("- All sectors revert monotonically: %s", stable))
+    message(sprintf("\nP(all sectors mean-revert | data) = %.3f", prob_stable))
   }
-  
+
   list(
     kappa_ic95 = kappa_ic95,
-    convergence = convergence,
-    prob_convergence = prob_conv
+    stable = stable,
+    convergence = stable,            # deprecated alias
+    prob_stable = prob_stable,
+    prob_convergence = prob_stable   # deprecated alias
   )
+}
+
+
+#' Mean-reversion (dynamic stability) evidence for kappa parameters
+#'
+#' Preferred alias of \code{\link{extract_convergence_evidence}}. See that
+#' function for details. The name avoids conflating dynamic mean reversion with
+#' MCMC sampler convergence.
+#'
+#' @inheritParams extract_convergence_evidence
+#' @return See \code{\link{extract_convergence_evidence}}.
+#' @export
+kappa_stability_evidence <- function(fit_res, verbose = TRUE) {
+  extract_convergence_evidence(fit_res, verbose = verbose)
 }
 
 
@@ -236,6 +265,8 @@ extract_convergence_evidence <- function(fit_res, verbose = TRUE) {
 #'
 #' @param fit Fitted Stan model object
 #' @param zTMG_use Numeric vector. Standardized TMG series used in fitting.
+#' @param summ Optional list from \code{\link{extract_posterior_summary}}. If
+#'   supplied, it is reused instead of recomputing the (expensive) summary.
 #'
 #' @return List with components:
 #'   \describe{
@@ -243,10 +274,16 @@ extract_convergence_evidence <- function(fit_res, verbose = TRUE) {
 #'     \item{meta}{List with description metadata}
 #'   }
 #'
+#' @details
+#' This is a deterministic point reconstruction
+#' \eqn{\beta_{s}(t) = \beta_{0,s} + \beta_1 \cdot zTMG_t} evaluated at the
+#' posterior medians of \code{beta0_s} and \code{beta1}. It is NOT a sampled
+#' time-varying coefficient: the time variation comes only from \code{zTMG_t}.
+#'
 #' @export
-build_beta_tmg_table <- function(fit, zTMG_use) {
-  summ <- extract_posterior_summary(fit)
-  
+build_beta_tmg_table <- function(fit, zTMG_use, summ = NULL) {
+  if (is.null(summ)) summ <- extract_posterior_summary(fit)
+
   beta_ts <- outer(zTMG_use, rep(1, length(summ$beta0_s))) * summ$beta1 +
     matrix(
       rep(summ$beta0_s, each = length(zTMG_use)),
@@ -293,11 +330,15 @@ summarize_sv_sigmas <- function(fit) {
 
 #' Drift decomposition over grid
 #'
-#' Computes the cubic OU drift function over a grid of z values.
+#' Computes the cubic OU drift function over a grid of \emph{centered} deviations
+#' \eqn{z = Y - \theta_s}. The evaluated function is
+#' \eqn{\kappa_s(-z + a_{3,s} z^3)}, i.e. the drift expressed in the deviation
+#' coordinate, not in the original \eqn{Y} coordinate. To plot against \eqn{Y},
+#' shift the grid by the corresponding \code{theta_s}.
 #'
 #' @param fit Fitted Stan model object (reserved for future use)
 #' @param summ List. Output from \code{\link{extract_posterior_summary}}
-#' @param z_grid Numeric vector. Grid of z values to evaluate drift.
+#' @param z_grid Numeric vector. Grid of centered deviation values (Y - theta).
 #'
 #' @return List with components:
 #'   \describe{
@@ -343,12 +384,23 @@ build_accounting_block <- function(TMG_raw, zTMG_exo, zTMG_use,
   tmg_byK <- zTMG_use * sd_tmg + mu_tmg
   tmg_exo <- zTMG_exo * sd_tmg + mu_tmg
   delta <- tmg_byK - tmg_exo
-  
+
+  # Sanity audit: the back-transformed exogenous TMG must reproduce the raw
+  # series (zTMG_exo = (TMG_raw - mu)/sd). A large error signals an upstream
+  # standardization mismatch.
+  backtransform_max_err <- if (!is.null(TMG_raw) &&
+                               length(TMG_raw) == length(tmg_exo)) {
+    max(abs(tmg_exo - TMG_raw), na.rm = TRUE)
+  } else {
+    NA_real_
+  }
+
   list(
     tmg_byK = tmg_byK,
     tmg_exo = tmg_exo,
     wedge_delta = if (hard) rep(0, length(delta)) else delta,
     sigma_delta_prior = sigma_delta,
+    backtransform_max_err = backtransform_max_err,
     note = if (hard) {
       "hard=TRUE: TMG identical to byK"
     } else {

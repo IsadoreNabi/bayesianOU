@@ -36,10 +36,28 @@ evaluate_oos(
 \item{horizons}{Integer vector. Forecast horizons to evaluate}
 }
 \value{
-Named list with one element per horizon...
+Named list with one element per horizon, each a list with
+  \code{h}, \code{RMSE}, \code{MAE} and \code{n_obs} (number of pooled
+  sector-by-origin errors; \code{0} / \code{NA} when the horizon exceeds the
+  test window).
 }
 \description{
 Computes RMSE and MAE for multiple forecast horizons.
+}
+\details{
+Two caveats matter for interpretation:
+\enumerate{
+  \item \strong{Conditional forecast.} The recursion uses the \emph{realized}
+    future covariates \eqn{X_{t-1}} and \eqn{zTMG_t} at each step. It is
+    therefore a forecast of \eqn{Y} \emph{conditional on} the future paths of
+    \eqn{X} and TMG, not an unconditional forecast. If those covariates are
+    not known ex ante, treat these numbers as conditional/nowcasting metrics.
+  \item \strong{Plug-in medians.} The path is propagated with posterior
+    medians of the parameters and ignores parameter uncertainty, the
+    stochastic volatility and the Student-t innovations. It is a point
+    (mean-equation) forecast, not the full posterior predictive distribution.
+    For genuinely out-of-sample numbers, fit with \code{fit_window = "train"}.
+}
 }
 \examples{
 # 1. Generate dummy data for testing

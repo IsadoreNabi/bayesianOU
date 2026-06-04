@@ -10,18 +10,35 @@
 #' @param COM Numeric matrix (T x S). Composition of capital by sector.
 #' @param CAPITAL_TOTAL Numeric matrix (T x S). Total capital by sector.
 #' @param model Character. Model type. Currently only "base" supported.
-#' @param priors List. Prior specifications. Currently supports sigma_delta.
+#' @param priors List. Prior specifications (partial override allowed; missing
+#'   entries fall back to robust defaults). Supported names: \code{sigma_delta}
+#'   (wedge SD, original units, default 0.002); \code{beta1_mean}/\code{beta1_sd}
+#'   (prior for the global TMG effect, default 0 / 0.5 -- neutral, no sign baked
+#'   in); \code{nu_shape}/\code{nu_rate} (gamma prior for the Student-t degrees of
+#'   freedom shift, default 2 / 0.1 -> weakly informative, prior mean nu ~ 22);
+#'   \code{rho_mean}/\code{rho_sd} (SV persistence prior, default 0.7 / 0.2).
 #' @param com_in_mean Logical. Include COM effect in mean equation. Default TRUE.
+#' @param train_frac Numeric in (0,1). Fraction of observations used for the
+#'   training window. Default 0.70.
+#' @param fit_window Character. \code{"train"} (default) fits the likelihood and
+#'   computes \code{log_lik} ONLY on the training window (2:T_train), so the
+#'   test window is genuinely held out and \code{evaluate_oos} is a real
+#'   out-of-sample evaluation. \code{"full"} fits on all observations
+#'   (full-information / rstanarm-style); then PSIS-LOO is valid over all points
+#'   but \code{evaluate_oos} becomes in-sample. See the README methodology note.
 #' @param chains Integer. Number of MCMC chains. Default 6.
-#' @param iter Integer. Total iterations per chain. Default 12000.
+#' @param iter Integer. Total iterations per chain (must exceed warmup). Default 12000.
 #' @param warmup Integer. Warmup iterations. Default 6000.
-#' @param thin Integer. Thinning interval. Default 2.
+#' @param thin Integer. Thinning interval. Default 1 (thinning is statistically
+#'   wasteful in HMC; increase only to save memory).
 #' @param cores Integer. Number of cores for parallel chains.
-#' @param threads_per_chain Integer. Threads per chain for within-chain parallelism.
+#' @param threads_per_chain Integer. Threads per chain for within-chain
+#'   parallelism. Capped internally so parallel_chains * threads <= cores.
 #' @param hard_sum_zero Logical. If TRUE, TMG wedge is fixed at zero. Default TRUE.
 #' @param orthogonalize_tmg Logical. Orthogonalize TMG w.r.t. common factor. Default TRUE.
 #' @param factor_from Character. Source for common factor: "X" or "Y". Default "X".
-#' @param use_train_loadings Logical. Compute factor loadings from training only. Default FALSE.
+#' @param use_train_loadings Logical. Compute factor loadings from training only
+#'   (avoids look-ahead leakage). Default TRUE.
 #' @param adapt_delta Numeric. Target acceptance rate (0-1). Default 0.97.
 #' @param max_treedepth Integer. Maximum tree depth for NUTS. Default 12.
 #' @param seed Integer. Random seed for reproducibility.
@@ -40,9 +57,20 @@
 #'   }
 #'
 #' @details
-#' The model uses hierarchical priors for sector-specific parameters.
-#' Training period is set to 70 percent of observations by default.
-#' All data standardization uses training period statistics only.
+#' The model uses a non-centered hierarchical (partial-pooling) parameterization
+#' for the sector-specific parameters \code{theta_s}, \code{kappa_s},
+#' \code{a3_s} and \code{beta0_s}: each is built as
+#' \code{hyper_intercept + hyper_slope * COM_s + hyper_sd * z}, with
+#' \code{z ~ N(0,1)}. The training window is \code{floor(T * train_frac)}.
+#' All data standardization, the COM weighting, and (by default) the common
+#' factor loadings are computed from the training window only. The likelihood
+#' window is controlled by \code{fit_window} to keep train/test coherent.
+#'
+#' The cubic drift enforces \code{a3 < 0} (a restoring force that strengthens
+#' with the deviation); this is a stability \emph{assumption}, not an estimated
+#' result, and it precludes detecting locally expansive (self-amplifying)
+#' regimes. The Euler discretization uses dt = 1, so the discrete persistence of
+#' the linear part is \code{1 - kappa}; interpret half-lives accordingly.
 #'
 #' @examples
 #' \donttest{
@@ -80,18 +108,20 @@ fit_ou_nonlinear_tmg <- function(
     COM,
     CAPITAL_TOTAL,
     model = c("base"),
-    priors = list(sigma_delta = 0.002),
+    priors = list(),
     com_in_mean = TRUE,
+    train_frac = 0.70,
+    fit_window = c("train", "full"),
     chains = 6,
     iter = 12000,
     warmup = 6000,
-    thin = 2,
+    thin = 1,
     cores = max(1, parallel::detectCores() - 1),
     threads_per_chain = 2,
     hard_sum_zero = TRUE,
     orthogonalize_tmg = TRUE,
     factor_from = c("X", "Y"),
-    use_train_loadings = FALSE,
+    use_train_loadings = TRUE,
     adapt_delta = 0.97,
     max_treedepth = 12,
     seed = 1234,
@@ -99,21 +129,40 @@ fit_ou_nonlinear_tmg <- function(
     moment_match = NULL,
     verbose = FALSE
 ) {
-  
-  old_wd <- getwd()
-  temp_dir <- tempdir()
-  setwd(temp_dir)
-  on.exit(setwd(old_wd), add = TRUE)
-  
+
   factor_from <- match.arg(factor_from)
   model <- match.arg(model)
-  
+  fit_window <- match.arg(fit_window)
+
+  # Merge user priors over robust defaults (partial override allowed).
+  prior_defaults <- list(
+    sigma_delta = 0.002,
+    beta1_mean  = 0,      beta1_sd = 0.5,   # neutral on the TMG effect H1
+    nu_shape    = 2,      nu_rate  = 0.1,   # weakly-informative df (mean ~22)
+    rho_mean    = 0.7,    rho_sd   = 0.2    # not the rigid N(0.90, 0.05)
+  )
+  priors <- utils::modifyList(prior_defaults, priors %||% list())
+
   stopifnot(is.matrix(Y) || is.data.frame(Y))
   stopifnot(is.matrix(X) || is.data.frame(X))
   Y <- as.matrix(Y)
   X <- as.matrix(X)
   stopifnot(nrow(Y) == nrow(X), ncol(Y) == ncol(X))
   stopifnot(length(TMG) == nrow(Y))
+
+  # ---- Hard input validation (fail early with a clear message) ----
+  if (!all(is.finite(Y))) stop("`Y` contains non-finite values (NA/NaN/Inf).", call. = FALSE)
+  if (!all(is.finite(X))) stop("`X` contains non-finite values (NA/NaN/Inf).", call. = FALSE)
+  if (!all(is.finite(TMG))) stop("`TMG` contains non-finite values.", call. = FALSE)
+  if (!is.numeric(train_frac) || train_frac <= 0 || train_frac >= 1) {
+    stop("`train_frac` must be in (0, 1).", call. = FALSE)
+  }
+  if (warmup < 1L || iter <= warmup) {
+    stop(sprintf("`iter` (%d) must be strictly greater than `warmup` (%d).",
+                 as.integer(iter), as.integer(warmup)), call. = FALSE)
+  }
+  if (chains < 1L) stop("`chains` must be >= 1.", call. = FALSE)
+  if (thin < 1L) stop("`thin` must be >= 1.", call. = FALSE)
   
   stopifnot(is.matrix(COM) || is.data.frame(COM))
   stopifnot(is.matrix(CAPITAL_TOTAL) || is.data.frame(CAPITAL_TOTAL))
@@ -122,9 +171,16 @@ fit_ou_nonlinear_tmg <- function(
   
   Tn <- nrow(Y)
   S <- ncol(Y)
-  T_train <- max(2L, floor(Tn * 0.70))
-  
-  vmsg(sprintf("Data dimensions: T=%d, S=%d, T_train=%d", Tn, S, T_train), verbose)
+  T_train <- max(2L, floor(Tn * train_frac))
+  if (T_train >= Tn) {
+    stop("`train_frac` leaves no observations for the test window; lower it.",
+         call. = FALSE)
+  }
+  # Likelihood/log-lik window: train-only (honest forecasting) vs full sample.
+  T_lik <- if (fit_window == "train") T_train else Tn
+
+  vmsg(sprintf("Data dimensions: T=%d, S=%d, T_train=%d, fit_window=%s (T_lik=%d)",
+               Tn, S, T_train, fit_window, T_lik), verbose)
   
   if (!is.null(colnames(Y)) && !is.null(colnames(COM_ts))) {
     common <- intersect(colnames(Y), colnames(COM_ts))
@@ -196,31 +252,50 @@ fit_ou_nonlinear_tmg <- function(
     COM_ts = COM_ts,
     K_ts = K_ts,
     com_in_mean = as.integer(isTRUE(com_in_mean)),
-    mu_xz = rep(0.0, S)
+    mu_xz = rep(0.0, S),
+    T_lik = as.integer(T_lik),
+    beta1_prior_mean = as.numeric(priors$beta1_mean),
+    beta1_prior_sd = as.numeric(priors$beta1_sd),
+    nu_prior_shape = as.numeric(priors$nu_shape),
+    nu_prior_rate = as.numeric(priors$nu_rate),
+    rho_prior_mean = as.numeric(priors$rho_mean),
+    rho_prior_sd = as.numeric(priors$rho_sd)
   )
-  
-  stan_src <- ou_nonlinear_tmg_stan_code()
+
   fit <- NULL
   backend <- check_stan_backend(verbose)
-  
+
   if (backend == "none") {
     stop("Stan backend required. Please install cmdstanr or rstan.")
   }
-  
+
+  # Avoid thread oversubscription: parallel_chains * threads_per_chain <= cores.
+  par_chains <- max(1L, min(as.integer(chains), as.integer(cores)))
+  thr_per_chain <- max(1L, min(as.integer(threads_per_chain),
+                               as.integer(floor(cores / par_chains))))
+
   if (backend == "cmdstanr") {
-    vmsg("Compiling Stan model with cmdstanr", verbose)
-    tf <- cmdstanr::write_stan_file(stan_src)
+    vmsg("Compiling Stan model with cmdstanr (from canonical .stan file)", verbose)
+    # Compile into a writable user cache (NOT the package/library directory,
+    # which may be read-only, and NOT the source tree). cmdstanr reuses the
+    # cached binary across sessions when the model is unchanged.
+    cache_dir <- tryCatch({
+      d <- tools::R_user_dir("bayesianOU", "cache")
+      dir.create(d, recursive = TRUE, showWarnings = FALSE)
+      if (dir.exists(d)) d else tempdir()
+    }, error = function(e) tempdir())
     mod <- cmdstanr::cmdstan_model(
-      tf,
+      .stan_file_path(),
+      dir = cache_dir,
       pedantic = FALSE,
       cpp_options = list(stan_threads = TRUE)
     )
-    
+
     vmsg("Running MCMC sampling", verbose)
     fit <- mod$sample(
       data = stan_dat,
       chains = chains,
-      parallel_chains = min(chains, cores),
+      parallel_chains = par_chains,
       iter_warmup = warmup,
       iter_sampling = iter - warmup,
       thin = thin,
@@ -228,12 +303,12 @@ fit_ou_nonlinear_tmg <- function(
       refresh = if (verbose) 200 else 0,
       adapt_delta = adapt_delta,
       max_treedepth = max_treedepth,
-      threads_per_chain = threads_per_chain,
+      threads_per_chain = thr_per_chain,
       init = init
     )
   } else {
     vmsg("Compiling Stan model with rstan", verbose)
-    sm <- rstan::stan_model(model_code = stan_src)
+    sm <- rstan::stan_model(model_code = ou_nonlinear_tmg_stan_code())
     
     vmsg("Running MCMC sampling", verbose)
     fit <- rstan::sampling(
@@ -251,33 +326,32 @@ fit_ou_nonlinear_tmg <- function(
   }
   
   vmsg("Extracting posterior summaries", verbose)
-  posterior <- if (inherits(fit, "CmdStanMCMC")) {
-    fit$draws()
-  } else {
-    rstan::As.mcmc.list(fit)
-  }
-  
   summ <- extract_posterior_summary(fit)
   rhat_vec <- as.numeric(summ$rhat)
   rhat_max <- max(rhat_vec, na.rm = TRUE)
   rhat_share <- mean(rhat_vec > 1.01, na.rm = TRUE)
-  
-  vmsg("Computing PSIS-LOO", verbose)
-  if (inherits(fit, "CmdStanMCMC")) {
-    log_lik <- fit$draws("log_lik", format = "matrix")
-    loglik_arr <- array(log_lik, dim = c(nrow(log_lik), Tn, S))
-  } else {
-    loglik_arr <- rstan::extract(fit, pars = "log_lik")[[1]]
+
+  if (isTRUE(moment_match)) {
+    vmsg(paste("Note: moment_match is not applied to the array-based PSIS-LOO.",
+               "Use loo::loo_moment_match() on the returned stan_fit if needed."),
+         verbose)
   }
-  loglik_train <- loglik_arr[, 2:T_train, , drop = FALSE]
-  
+
+  vmsg("Computing PSIS-LOO over the fitted window (2:T_lik)", verbose)
   loo_res <- NULL
+  loo_pareto_k_summary <- NULL
   if (requireNamespace("loo", quietly = TRUE)) {
-    args <- list(loglik_train)
-    if (!is.null(moment_match)) args$moment_match <- moment_match
-    loo_res <- do.call(loo::loo, args)
+    loo_res <- tryCatch(
+      .compute_loo(fit, T_lik, S),
+      error = function(e) {
+        warning("PSIS-LOO could not be computed: ", conditionMessage(e),
+                call. = FALSE)
+        NULL
+      }
+    )
+    if (!is.null(loo_res)) loo_pareto_k_summary <- .summarize_pareto_k(loo_res)
   }
-  
+
   vmsg("Computing out-of-sample metrics", verbose)
   oos <- evaluate_oos(
     summ, zY$Mz, zX$Mz, zTMG_use, T_train,
@@ -290,35 +364,37 @@ fit_ou_nonlinear_tmg <- function(
   vmsg("Computing divergence count", verbose)
   dv <- count_divergences(fit)
   
-  out <- results_robust
-  out$factor_ou <- c(
-    out$factor_ou %||% list(),
-    list(
-      model = "ou_nonlinear_tmg",
-      draws = posterior,
-      stan_fit = fit,
-      beta1 = summ$beta1,
-      beta0_s = summ$beta0_s,
-      kappa_s = summ$kappa_s,
-      a3_s = summ$a3_s,
-      theta_s = summ$theta_s,
-      sv = list(
-        alpha = summ$alpha_s,
-        rho = summ$rho_s,
-        sigma_eta = summ$sigma_eta_s
-      ),
-      nu = summ$nu,
-      gamma = summ$gamma,
-      factor_ou_info = list(
-        T_train = T_train,
-        com_in_mean = isTRUE(com_in_mean),
-        factor_from = factor_from,
-        use_train_loadings = isTRUE(use_train_loadings)
-      )
+  out <- results_robust %||% list()
+  # Direct assignment (do NOT c()-append: that produced duplicated names on
+  # repeated calls). The full draws array is intentionally NOT duplicated here;
+  # access draws via the returned stan_fit. To persist across sessions with
+  # cmdstanr, call results$factor_ou$stan_fit$save_object(file).
+  out$factor_ou <- list(
+    model = "ou_nonlinear_tmg",
+    stan_fit = fit,
+    beta1 = summ$beta1,
+    beta0_s = summ$beta0_s,
+    kappa_s = summ$kappa_s,
+    a3_s = summ$a3_s,
+    theta_s = summ$theta_s,
+    sv = list(
+      alpha = summ$alpha_s,
+      rho = summ$rho_s,
+      sigma_eta = summ$sigma_eta_s
+    ),
+    nu = summ$nu,
+    gamma = summ$gamma,
+    factor_ou_info = list(
+      T_train = T_train,
+      T_lik = T_lik,
+      fit_window = fit_window,
+      com_in_mean = isTRUE(com_in_mean),
+      factor_from = factor_from,
+      use_train_loadings = isTRUE(use_train_loadings)
     )
   )
-  
-  out$beta_tmg <- build_beta_tmg_table(fit, zTMG_use)
+
+  out$beta_tmg <- build_beta_tmg_table(fit, zTMG_use, summ = summ)
   out$sv <- list(h_summary = summarize_sv_sigmas(fit), rho_s = summ$rho_s)
   out$nonlinear <- list(
     a3 = summ$a3_s,
@@ -335,6 +411,7 @@ fit_ou_nonlinear_tmg <- function(
     rhat_share = rhat_share,
     divergences = dv,
     loo = loo_res,
+    loo_pareto_k = loo_pareto_k_summary,
     oos = oos
   )
   

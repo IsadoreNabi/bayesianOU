@@ -41,7 +41,21 @@ zscore_train <- function(M, T_train, eps = 1e-8) {
   if (!is.matrix(M)) {
     M <- as.matrix(M)
   }
-  
+
+  if (!is.numeric(T_train) || length(T_train) != 1L ||
+      !is.finite(T_train)) {
+    stop("`T_train` must be a single finite number.", call. = FALSE)
+  }
+  T_train <- as.integer(T_train)
+  if (T_train < 2L) {
+    stop("`T_train` must be at least 2 to estimate a standard deviation.",
+         call. = FALSE)
+  }
+  if (T_train > nrow(M)) {
+    stop(sprintf("`T_train` (%d) exceeds the number of rows (%d).",
+                 T_train, nrow(M)), call. = FALSE)
+  }
+
   train_data <- M[seq_len(T_train), , drop = FALSE]
   mu <- colMeans(train_data, na.rm = TRUE)
   sdv <- apply(train_data, 2, stats::sd, na.rm = TRUE)
@@ -147,14 +161,18 @@ vmsg <- function(msg, verbose) {
 #'
 #' @param Mz Standardized matrix (T x S)
 #' @param T_train Number of training observations
-#' @param use_train_loadings Logical. If TRUE, compute loadings only from
-#'   training data. Default FALSE.
+#' @param use_train_loadings Logical. If TRUE (default), compute the factor
+#'   loadings using only the training period and then project the full series
+#'   onto them. This avoids look-ahead leakage. If FALSE, the loadings are
+#'   computed from the full sample (SVD over all T), which lets future
+#'   information influence the constructed factor; only use FALSE for purely
+#'   in-sample, descriptive analyses.
 #' @param verbose Logical. Print progress messages. Default FALSE.
 #'
 #' @return Numeric vector of factor scores (length T)
 #'
 #' @keywords internal
-compute_common_factor <- function(Mz, T_train, use_train_loadings = FALSE,
+compute_common_factor <- function(Mz, T_train, use_train_loadings = TRUE,
                                   verbose = FALSE) {
   if (isTRUE(use_train_loadings)) {
     vmsg("Computing factor using training-period loadings only", verbose)

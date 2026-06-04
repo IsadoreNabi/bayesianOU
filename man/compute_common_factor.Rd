@@ -4,15 +4,19 @@
 \alias{compute_common_factor}
 \title{Compute common factor from matrix}
 \usage{
-compute_common_factor(Mz, T_train, use_train_loadings = FALSE, verbose = FALSE)
+compute_common_factor(Mz, T_train, use_train_loadings = TRUE, verbose = FALSE)
 }
 \arguments{
 \item{Mz}{Standardized matrix (T x S)}
 
 \item{T_train}{Number of training observations}
 
-\item{use_train_loadings}{Logical. If TRUE, compute loadings only from
-training data. Default FALSE.}
+\item{use_train_loadings}{Logical. If TRUE (default), compute the factor
+loadings using only the training period and then project the full series
+onto them. This avoids look-ahead leakage. If FALSE, the loadings are
+computed from the full sample (SVD over all T), which lets future
+information influence the constructed factor; only use FALSE for purely
+in-sample, descriptive analyses.}
 
 \item{verbose}{Logical. Print progress messages. Default FALSE.}
 }
