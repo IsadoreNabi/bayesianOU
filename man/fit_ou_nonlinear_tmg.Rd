@@ -2,7 +2,7 @@
 % Please edit documentation in R/fit_ou_nonlinear.R
 \name{fit_ou_nonlinear_tmg}
 \alias{fit_ou_nonlinear_tmg}
-\title{Fit Bayesian nonlinear OU model with TMG effect and SV}
+\title{Fit Bayesian nonlinear OU model with TMG effect and SV (single-level)}
 \usage{
 fit_ou_nonlinear_tmg(
   results_robust,
@@ -105,19 +105,20 @@ parallelism. Capped internally so parallel_chains * threads <= cores.}
 \item{verbose}{Logical. Print progress messages. Default FALSE.}
 }
 \value{
-List containing:
-  \describe{
-    \item{factor_ou}{Model results including draws and parameter estimates}
-    \item{beta_tmg}{Time-varying beta estimates}
-    \item{sv}{Stochastic volatility summaries}
-    \item{nonlinear}{Nonlinearity diagnostics}
-    \item{accounting}{TMG accounting block}
-    \item{diagnostics}{MCMC diagnostics, LOO, and OOS metrics}
-  }
+List containing \code{factor_ou} (model results and parameter
+  estimates), \code{beta_tmg}, \code{sv}, \code{nonlinear}, \code{accounting}
+  and \code{diagnostics} (MCMC diagnostics, PSIS-LOO and OOS metrics). See
+  \code{\link{fit_ou_nested}} for the underlying engine and the 2-level model.
 }
 \description{
-Fits a Bayesian nonlinear Ornstein-Uhlenbeck model with cubic drift,
-stochastic volatility, and Student-t innovations using Stan.
+Backward-compatible single-level entry point. This is a thin wrapper around
+\code{\link{fit_ou_nested}} with \code{n_levels = 1}: the nested engine is the
+single source of truth, and \code{n_levels = 1} reproduces the legacy
+single-level model exactly (market price reverts to a constant level with a
+linear forcing by the production price \code{X} and a TMG interaction). The
+returned object keeps the historical structure and S3 class
+\code{"ou_nonlinear_tmg"} so existing extractors, plots and validators work
+unchanged.
 }
 \details{
 The model uses a non-centered hierarchical (partial-pooling) parameterization
@@ -147,16 +148,13 @@ COM <- matrix(runif(T_obs * S_sectors), nrow = T_obs, ncol = S_sectors)
 K <- matrix(runif(T_obs * S_sectors, 100, 1000), nrow = T_obs, ncol = S_sectors)
 
 # 2. Run model (conditional on Stan backend availability)
-# We use very short chains just to demonstrate execution
-if (requireNamespace("cmdstanr", quietly = TRUE) || 
+if (requireNamespace("cmdstanr", quietly = TRUE) ||
     requireNamespace("rstan", quietly = TRUE)) {
-  
-  # Wrap in try to avoid failure if Stan is not configured locally
   try({
     results <- fit_ou_nonlinear_tmg(
       results_robust = list(),
       Y = Y, X = X, TMG = TMG, COM = COM, CAPITAL_TOTAL = K,
-      chains = 1, iter = 100, warmup = 50, # Short run for example
+      chains = 1, iter = 100, warmup = 50,
       verbose = FALSE
     )
   }, silent = TRUE)

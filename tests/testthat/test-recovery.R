@@ -54,17 +54,29 @@ test_that("the Stan model recovers known parameters (90% CI coverage)", {
   }
 
   stan_dat <- list(
+    n_levels = 1L,
     T = T_obs, S = S, T_train = T_train, T_lik = T_obs,
     Yz = Yz, Xz = Xz, zTMG_byK = zTMG, zTMG_exo = zTMG,
     soft_wedge = 0L, sigma_delta_z = 0.01, COM_ts = COM, K_ts = K,
     com_in_mean = 1L, mu_xz = rep(0, S),
     beta1_prior_mean = 0, beta1_prior_sd = 0.5,
     nu_prior_shape = 2, nu_prior_rate = 0.1,
-    rho_prior_mean = 0.7, rho_prior_sd = 0.2
+    rho_prior_mean = 0.7, rho_prior_sd = 0.2,
+    # Level-2 fields are length 0 in single-level mode.
+    Phi_anchor_z = matrix(0.0, 0L, 0L), Gprime = numeric(0),
+    theta_sep = 0L, sigma_phi_meas_prior_sd = 0.5,
+    sigma_phi_meas_fixed = 0L, sigma_phi_meas_value = 0.5,
+    V_anchor_z = matrix(0.0, 0L, 0L), kappa_cap = 2,
+    # Per-level richness switches (canonical) and reconstruction fields (off).
+    l1_cubic = 1L, l1_sv = 1L, l1_studentt = 1L, l1_hier = 1L,
+    l2_cubic = 0L, l2_sv = 0L, l2_studentt = 0L, l2_hier = 1L,
+    k_recon = 0L, k_cost = matrix(0.0, 0L, 0L), K_hat = matrix(0.0, 0L, 0L),
+    Gprime_raw = numeric(0), phi_recon_center = numeric(0),
+    phi_recon_scale = numeric(0), sigma_K_recon = 0.10
   )
 
   mod <- cmdstanr::cmdstan_model(
-    cmdstanr::write_stan_file(ou_nonlinear_tmg_stan_code()),
+    cmdstanr::write_stan_file(ou_nested_stan_code()),
     cpp_options = list(stan_threads = TRUE)
   )
   fit <- mod$sample(
