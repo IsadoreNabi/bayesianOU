@@ -18,7 +18,7 @@ PSIS-LOO (Vehtari, Gelman, Gabry 2017).
 remotes::install_github("IsadoreNabi/bayesianOU")
 
 # Stan backend (cmdstanr recommended):
-install.packages("cmdstanr", repos = c("https://mc-stan.org/r-packages/", getOption("repos")))
+install.packages("cmdstanr", repos = c("https://stan-dev.r-universe.dev/", getOption("repos")))
 cmdstanr::install_cmdstan()
 # Or rstan:
 install.packages("rstan")
